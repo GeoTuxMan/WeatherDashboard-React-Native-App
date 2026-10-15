@@ -1,24 +1,42 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, Image, StyleSheet, ScrollView, Dimensions } from 'react-native';
+import React, { useState, useEffect, useCallback } from 'react';
+import {
+  View, Text, Image, StyleSheet, ScrollView, Dimensions, RefreshControl, TouchableOpacity,
+} from 'react-native';
 import { LineChart } from 'react-native-chart-kit';
 import axios from 'axios';
 
+const LAT = 44.17;
+const LON = 28.62;
+
+// Open-Meteo: valorile curente vin din "current" (ora locala a orasului, timezone=auto)
+const WEATHER_URL =
+  `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}` +
+  '&current=temperature_2m,relative_humidity_2m,pressure_msl,visibility,weather_code,wind_speed_10m' +
+  '&hourly=temperature_2m' +
+  '&daily=weather_code,temperature_2m_min,temperature_2m_max,sunrise,sunset,uv_index_max' +
+  '&timezone=auto&forecast_days=4';
+const AIR_URL =
+  `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${LAT}&longitude=${LON}` +
+  '&current=european_aqi&timezone=auto';
+
 // Definim tipurile pentru datele meteo
 type WeatherData = {
-  current_weather: {
-    temperature: number;
-    weathercode: number;
-    windspeed: number;
+  current: {
+    time: string;
+    temperature_2m: number;
+    relative_humidity_2m: number;
+    pressure_msl: number;
+    visibility: number;
+    weather_code: number;
+    wind_speed_10m: number;
   };
   hourly: {
     time: string[];
     temperature_2m: number[];
-    pressure_msl: number[];
-    relative_humidity_2m: number[];
-    visibility: number[];
   };
   daily: {
     time: string[];
+    weather_code: number[];
     temperature_2m_min: number[];
     temperature_2m_max: number[];
     sunrise: string[];
@@ -28,160 +46,169 @@ type WeatherData = {
 };
 
 type AirQualityData = {
-  hourly: {
-    european_aqi: number[];
+  current: {
+    european_aqi: number | null;
   };
 };
+
+// Iconite si descrieri pentru toate codurile WMO folosite de Open-Meteo
+const ICONS = {
+  clear: require('./assets/icons/01d.png'),
+  fewClouds: require('./assets/icons/02d.png'),
+  clouds: require('./assets/icons/03d.png'),
+  overcast: require('./assets/icons/04d.png'),
+  fog: require('./assets/icons/50d.png'),
+  drizzle: require('./assets/icons/09d.png'),
+  rain: require('./assets/icons/10d.png'),
+  snow: require('./assets/icons/13d.png'),
+  storm: require('./assets/icons/11d.png'),
+};
+
+const WMO: Record<number, [string, keyof typeof ICONS]> = {
+  0: ['Clear sky', 'clear'],
+  1: ['Mainly clear', 'fewClouds'],
+  2: ['Partly cloudy', 'clouds'],
+  3: ['Overcast', 'overcast'],
+  45: ['Fog', 'fog'],
+  48: ['Depositing rime fog', 'fog'],
+  51: ['Light drizzle', 'drizzle'],
+  53: ['Drizzle', 'drizzle'],
+  55: ['Dense drizzle', 'drizzle'],
+  56: ['Freezing drizzle', 'drizzle'],
+  57: ['Dense freezing drizzle', 'drizzle'],
+  61: ['Light rain', 'rain'],
+  63: ['Moderate rain', 'rain'],
+  65: ['Heavy rain', 'rain'],
+  66: ['Freezing rain', 'rain'],
+  67: ['Heavy freezing rain', 'rain'],
+  71: ['Light snow', 'snow'],
+  73: ['Snow', 'snow'],
+  75: ['Heavy snow', 'snow'],
+  77: ['Snow grains', 'snow'],
+  80: ['Light showers', 'drizzle'],
+  81: ['Showers', 'drizzle'],
+  82: ['Violent showers', 'rain'],
+  85: ['Snow showers', 'snow'],
+  86: ['Heavy snow showers', 'snow'],
+  95: ['Thunderstorm', 'storm'],
+  96: ['Thunderstorm with hail', 'storm'],
+  99: ['Thunderstorm with heavy hail', 'storm'],
+};
+
+const weatherIcon = (code: number) => ICONS[WMO[code]?.[1] ?? 'clear'];
+const weatherText = (code: number) => WMO[code]?.[0] ?? 'Unknown';
+
+// European AQI (0-100+), benzile Agentiei Europene de Mediu
+const interpretAQI = (value: number | null | undefined): string => {
+  if (value === null || value === undefined) return 'N/A';
+  if (value <= 20) return 'Good';
+  if (value <= 40) return 'Fair';
+  if (value <= 60) return 'Moderate';
+  if (value <= 80) return 'Poor';
+  if (value <= 100) return 'Very poor';
+  return 'Extremely poor';
+};
+
+// Orele din API sunt deja in ora locala a orasului ("2026-10-15T07:20"): le afisam direct
+const formatTime = (iso: string): string => iso.slice(11, 16);
 
 const WeatherApp: React.FC = () => {
   const [weatherData, setWeatherData] = useState<WeatherData | null>(null);
   const [airQuality, setAirQuality] = useState<AirQualityData | null>(null);
-  const [date, setDate] = useState<string>('');
+  const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  // Obiectul cu iconite 
-  const icons: Record<number, any> = {
-    0: require('./assets/icons/01d.png'),
-    1: require('./assets/icons/02d.png'),
-    2: require('./assets/icons/03d.png'),
-    3: require('./assets/icons/04d.png'),
-    45: require('./assets/icons/04d.png'),
-    48: require('./assets/icons/04d.png'),
-    51: require('./assets/icons/09d.png'),
-    61: require('./assets/icons/09d.png'),
-    63: require('./assets/icons/10d.png'),
-    65: require('./assets/icons/10d.png'),
-    71: require('./assets/icons/13d.png'),
-    80: require('./assets/icons/10d.png'),
-    95: require('./assets/icons/11d.png'),
-    99: require('./assets/icons/11d.png')
-  };
-
-  const weatherDescriptions: Record<number, string> = {
-    0: 'Clear sky', 1: 'Mainly clear', 2: 'Partly cloudy', 3: 'Overcast',
-    45: 'Fog', 48: 'Depositing rime fog', 51: 'Light drizzle',
-    61: 'Light rain', 63: 'Moderate rain', 65: 'Heavy rain',
-    71: 'Snow', 80: 'Showers', 95: 'Thunderstorm', 99: 'Heavy thunderstorm'
-  };
-
-  useEffect(() => {
-    const today = new Date();
-    setDate(today.toLocaleDateString('en-US', {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
-    }));
-
-    const fetchData = async () => {
-      try {
-        const [weatherResponse, airQualityResponse] = await Promise.all([
-          axios.get<WeatherData>('https://api.open-meteo.com/v1/forecast?latitude=44.17&longitude=28.62&hourly=temperature_2m,pressure_msl,relative_humidity_2m,visibility&daily=temperature_2m_min,temperature_2m_max,sunrise,sunset,uv_index_max&current_weather=true&timezone=auto'),
-          axios.get<AirQualityData>('https://air-quality-api.open-meteo.com/v1/air-quality?latitude=44.17&longitude=28.62&hourly=pm10,pm2_5,european_aqi&timezone=auto')
-        ]);
-
-        setWeatherData(weatherResponse.data);
-        setAirQuality(airQualityResponse.data);
-      } catch (error) {
-        console.error('Error fetching data:', error);
-      }
-    };
-
-    fetchData();
+  const fetchData = useCallback(async () => {
+    try {
+      setError(null);
+      const [weatherResponse, airQualityResponse] = await Promise.all([
+        axios.get<WeatherData>(WEATHER_URL, { timeout: 15000 }),
+        axios.get<AirQualityData>(AIR_URL, { timeout: 15000 }),
+      ]);
+      setWeatherData(weatherResponse.data);
+      setAirQuality(airQualityResponse.data);
+    } catch (e) {
+      console.error('Error fetching data:', e);
+      setError('Could not load the weather data. Check the internet connection.');
+    }
   }, []);
 
-  const formatTime = (iso: string): string => {
-    const date = new Date(iso);
-    return date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-  };
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
 
-  const interpretAQI = (value: number): string => {
-    const aqiMap: Record<number, string> = {
-      1: "Good",
-      2: "Fair",
-      3: "Moderate",
-      4: "Poor",
-      5: "Very Poor"
-    };
-    return aqiMap[value] || "Unknown";
-  };
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await fetchData();
+    setRefreshing(false);
+  }, [fetchData]);
 
   if (!weatherData || !airQuality) {
     return (
-      <View style={styles.container}>
-        <Text>Loading...</Text>
+      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
+        {error ? (
+          <>
+            <Text style={{ textAlign: 'center', marginBottom: 12 }}>{error}</Text>
+            <TouchableOpacity onPress={fetchData}>
+              <Text style={{ color: '#1e88e5', fontWeight: 'bold' }}>Try again</Text>
+            </TouchableOpacity>
+          </>
+        ) : (
+          <Text>Loading...</Text>
+        )}
       </View>
     );
   }
 
-  // Pregatire date pentru grafic
-  // Obține data și ora curentă
-const now = new Date();
-const currentDate = now.toISOString().split('T')[0]; // Format YYYY-MM-DD
-const currentHour = now.getHours();
+  const { current, daily, hourly } = weatherData;
 
-// Filtrează doar orele din ziua curentă (±2 ore)
-const relevantData = weatherData.hourly.time
-  .map((time, index) => ({
-    fullTime: new Date(time),
-    date: time.split('T')[0],
-    hour: new Date(time).getHours(),
-    temp: weatherData.hourly.temperature_2m[index],
-    index
-  }))
-  .filter(({ date, hour }) => 
-    date === currentDate && 
-    hour >= currentHour - 2 && 
-    hour <= currentHour + 2
-  );
+  // Data afisata = data locala a orasului (din API), nu cea a telefonului
+  const date = new Date(`${current.time.slice(0, 10)}T12:00:00`).toLocaleDateString('en-US', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+  });
 
-// Extrage etichetele și datele pentru grafic
-const chartLabels = relevantData.map(({ fullTime }) => 
-  fullTime.getHours() + ":00"
-);
-const chartData = relevantData.map(({ temp }) => temp);
+  // Grafic: ora curenta +/- 2 ore, cautata dupa textul orei (fara conversii de fus orar)
+  const nowHour = `${current.time.slice(0, 13)}:00`;
+  const nowIndex = Math.max(0, hourly.time.indexOf(nowHour));
+  const start = Math.max(0, nowIndex - 2);
+  const end = Math.min(hourly.time.length, nowIndex + 3);
+  const chartLabels = hourly.time.slice(start, end).map((t) => t.slice(11, 16));
+  const chartData = hourly.temperature_2m.slice(start, end);
+  const chartWidth = Dimensions.get('window').width - 40;
 
-// Calculează lățimea graficului
-const chartWidth = Math.max(
-  Dimensions.get('window').width - 40,
-  relevantData.length * 60
-);
   return (
-    <ScrollView style={styles.container}>
+    <ScrollView
+      style={styles.container}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+    >
       <Text style={styles.city}>Constanta, Romania</Text>
       <Text style={styles.date}>{date}</Text>
 
       <View style={styles.currentWeather}>
         {/* Column 1 */}
         <View style={styles.weatherColumn}>
-          <Image 
-            source={icons[weatherData.current_weather.weathercode] || icons[0]} 
-            style={styles.weatherIcon}
-          />
-          <Text style={styles.temperature}>
-            {Math.round(weatherData.current_weather.temperature)}°C
-          </Text>
-          <Text style={styles.description}>
-            {weatherDescriptions[weatherData.current_weather.weathercode] || 'N/A'}
-          </Text>
+          <Image source={weatherIcon(current.weather_code)} style={styles.weatherIcon} />
+          <Text style={styles.temperature}>{Math.round(current.temperature_2m)}°C</Text>
+          <Text style={styles.description}>{weatherText(current.weather_code)}</Text>
         </View>
 
         {/* Column 2 */}
         <View style={styles.detailsColumn}>
           <View style={styles.detailRow}>
             <Image source={require('./assets/icons/sunrise.png')} style={styles.smallIcon} />
-            <Text>Sunrise: {formatTime(weatherData.daily.sunrise[0])}</Text>
+            <Text>Sunrise: {formatTime(daily.sunrise[0])}</Text>
           </View>
           <View style={styles.detailRow}>
             <Image source={require('./assets/icons/wind.png')} style={styles.smallIcon} />
-            <Text>Wind: {weatherData.current_weather.windspeed} km/h</Text>
+            <Text>Wind: {Math.round(current.wind_speed_10m)} km/h</Text>
           </View>
           <View style={styles.detailRow}>
             <Image source={require('./assets/icons/pressure.png')} style={styles.smallIcon} />
-            <Text>Pressure: {weatherData.hourly.pressure_msl[0]} hPa</Text>
+            <Text>Pressure: {Math.round(current.pressure_msl)} hPa</Text>
           </View>
           <View style={styles.detailRow}>
             <Image source={require('./assets/icons/visibility.png')} style={styles.smallIcon} />
-            <Text>Visibility: {(weatherData.hourly.visibility[0]/1000).toFixed(1)} km</Text>
+            <Text>Visibility: {(current.visibility / 1000).toFixed(1)} km</Text>
           </View>
         </View>
 
@@ -189,39 +216,57 @@ const chartWidth = Math.max(
         <View style={styles.detailsColumn}>
           <View style={styles.detailRow}>
             <Image source={require('./assets/icons/sunset.png')} style={styles.smallIcon} />
-            <Text>Sunset: {formatTime(weatherData.daily.sunset[0])}</Text>
+            <Text>Sunset: {formatTime(daily.sunset[0])}</Text>
           </View>
           <View style={styles.detailRow}>
             <Image source={require('./assets/icons/humidity.png')} style={styles.smallIcon} />
-            <Text>Humidity: {weatherData.hourly.relative_humidity_2m[0]}%</Text>
+            <Text>Humidity: {current.relative_humidity_2m}%</Text>
           </View>
           <View style={styles.detailRow}>
             <Image source={require('./assets/icons/uvi.png')} style={styles.smallIcon} />
-            <Text>UV Index: {weatherData.daily.uv_index_max[0]}</Text>
+            <Text>UV Index: {daily.uv_index_max[0]?.toFixed(1)}</Text>
           </View>
           <View style={styles.detailRow}>
             <Image source={require('./assets/icons/aqi.png')} style={styles.smallIcon} />
-            <Text>Air Quality: {interpretAQI(airQuality.hourly.european_aqi[0])}</Text>
+            <Text>Air Quality: {interpretAQI(airQuality.current.european_aqi)}</Text>
           </View>
         </View>
       </View>
 
-      
+      {/* Temperature around the current hour */}
+      {chartData.length > 1 && (
+        <View style={styles.chartContainer}>
+          <Text style={styles.chartTitle}>Temperature (°C) around now</Text>
+          <LineChart
+            data={{ labels: chartLabels, datasets: [{ data: chartData }] }}
+            width={chartWidth - 30}
+            height={180}
+            yAxisSuffix="°"
+            chartConfig={{
+              backgroundGradientFrom: '#ffffff',
+              backgroundGradientTo: '#ffffff',
+              decimalPlaces: 1,
+              color: (opacity = 1) => `rgba(30, 136, 229, ${opacity})`,
+              labelColor: (opacity = 1) => `rgba(108, 117, 125, ${opacity})`,
+              propsForDots: { r: '4' },
+            }}
+            bezier
+            style={{ borderRadius: 12 }}
+          />
+        </View>
+      )}
 
       {/* 3-Day Forecast */}
       <Text style={styles.forecastTitle}>Forecast for 3 days</Text>
       <View style={styles.forecastContainer}>
-        {[1, 2, 3].map(day => (
-          <View key={day} style={styles.forecastCard}>
+        {[1, 2, 3].filter((day) => day < daily.time.length).map((day) => (
+          <View key={daily.time[day]} style={styles.forecastCard}>
             <Text style={styles.forecastDay}>
-              {new Date(weatherData.daily.time[day]).toLocaleDateString('en-US', { weekday: 'short' })}
+              {new Date(`${daily.time[day]}T12:00:00`).toLocaleDateString('en-US', { weekday: 'short' })}
             </Text>
-            <Image 
-              source={icons[weatherData.current_weather.weathercode] || icons[0]} 
-              style={styles.forecastIcon}
-            />
+            <Image source={weatherIcon(daily.weather_code[day])} style={styles.forecastIcon} />
             <Text style={styles.forecastTemp}>
-              {Math.round(weatherData.daily.temperature_2m_min[day])}° / {Math.round(weatherData.daily.temperature_2m_max[day])}°
+              {Math.round(daily.temperature_2m_min[day])}° / {Math.round(daily.temperature_2m_max[day])}°
             </Text>
           </View>
         ))}
