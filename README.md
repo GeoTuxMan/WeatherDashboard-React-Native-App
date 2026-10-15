@@ -2,7 +2,7 @@
 
 ![Weather dashboard screenshot](vremeaazi_new.png)
 
-Download apk file: https://drive.google.com/file/d/1_O1-9bLOOOcAt_0W2C4Z7tO59pgB9j7X/view?usp=sharing
+Download apk file: https://drive.google.com/file/d/1kbbACDZmoIhJ7Fq7-l4l8y0d21j6ufGm/view?usp=sharing
 
 Weather Dashboard app for Android (VremeaAzi), developed with React Native, Expo and TypeScript,
 tested on Genymotion (Android emulator). It shows the weather in Constanta, Romania, from the free
